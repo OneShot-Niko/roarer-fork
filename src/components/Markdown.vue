@@ -9,6 +9,7 @@ import Token from "markdown-it/lib/token";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { url as baseURL } from "../lib/env";
+import { linkPills } from "../lib/linkPills";
 import { hostWhitelist } from "../lib/hostWhitelist";
 import { DISCORD_REGEX } from "../lib/discordEmoji";
 import { useDialogStore } from "../stores/dialog";
@@ -139,7 +140,6 @@ effect(() => {
     return;
   }
   const element = main.value;
-  const domParser = new DOMParser();
   element.innerHTML = renderedMarkdown;
   element.querySelectorAll("img").forEach((img) => {
     if (
@@ -174,7 +174,7 @@ effect(() => {
       element.classList.add("rounded-xl");
     }
   });
-  element.querySelectorAll("a").forEach((el) => {
+  element.querySelectorAll("a").forEach(async (el) => {
     let url: URL;
     try {
       url = new URL(el.href);
@@ -193,8 +193,91 @@ effect(() => {
         })();
       }
     });
+    if (
+      el.href !== el.textContent &&
+      url.href.replace(url.protocol + "//", "") !== el.textContent
+    )
+      return;
+
+    const matchingLinks = linkPills.filter((link) =>
+      typeof link.base === "string"
+        ? link.base === url.hostname
+        : link.base.test(url.hostname),
+    );
+    for (const link of matchingLinks) {
+      const match = (
+        url.pathname +
+        (link.includeSearch ? url.search : "") +
+        (link.includeHash ? url.hash : "")
+      ).match(link.path);
+      if (!match) continue;
+      if (link.convertLink) {
+        const newLink = link.convertLink(match);
+        el.href = newLink;
+        url = new URL(newLink);
+      }
+      el.className =
+        "no-style filled:bg-background filled:text-text bordered:bg-accent bordered:text-accent-text rounded-lg px-2 gap-1 inline-flex items-center";
+      const icon = document.createElement("img");
+      icon.ariaLabel = link.name;
+      icon.src =
+        typeof link.icon === "string"
+          ? link.icon
+          : settingsStore.theme.roarer_colorScheme === "dark"
+            ? link.icon.dark
+            : link.icon.light;
+      icon.className = "inline-block h-[1em]";
+      icon.dataset.isImage = "";
+      el.innerHTML = "";
+      const text = document.createElement("span");
+      text.className = "flex gap-1 flex-wrap items-center";
+      el.append(icon, text);
+      const show = await link.text?.(match);
+      if (show) {
+        if (typeof show === "string") {
+          el.append(show);
+        } else {
+          show.forEach((part) => {
+            if (typeof part === "string") {
+              text.append(part);
+            } else if ("sm" in part) {
+              const span = document.createElement("span");
+              span.className = "opacity-60 font-bold text-xs text-nowrap";
+              span.textContent = part.sm;
+              text.append(span);
+            } else if ("code" in part) {
+              const code = document.createElement("code");
+              code.textContent = part.code;
+              text.append(code);
+            } else {
+              part satisfies never;
+            }
+          });
+        }
+      } else {
+        const show = match[1];
+        if (!show) {
+          console.warn(link, "didn't output anything to show");
+          continue;
+        }
+        el.append(show);
+      }
+      break;
+    }
+  });
+  element.querySelectorAll("code").forEach((element) => {
+    if (element.parentElement!.tagName === "PRE") return;
+    const match = element.textContent!.match(/^\(([a-z0-9]+)\) (.+)/);
+    if (!match) return;
+    const language = match[1];
+    const rest = match[2];
+    if (!language || !rest || !hljs.getLanguage(language)) return;
+    element.innerHTML = hljs.highlight(rest, { language }).value;
   });
   [...element.querySelectorAll("img")].forEach(async (element) => {
+    if (element.dataset.isImage !== undefined) {
+      return;
+    }
     let request;
     try {
       request = await fetch(element.src);
@@ -241,6 +324,25 @@ effect(() => {
     downloadButton.append(download);
     element.replaceWith(downloadButton);
   });
+  // @ts-ignore
+  const hash = _postHash(md);
+  const invalidHash = hash < 0x18e9eae3200 && hash > 0x18e94617a00;
+  if (invalidHash) {
+    const tree = document.createTreeWalker(main.value, NodeFilter.SHOW_TEXT);
+    while (tree.nextNode()) {
+      if (!tree.currentNode.textContent) continue;
+      const element = document.createElement("span");
+      element.innerHTML = [...tree.currentNode.textContent]
+        .map((char, i) => {
+          char = { "<": "&lt;", ">": "&gt;", "&": "&amp;" }[char] ?? char;
+          return char.trim() && i && !(i % 0o12)
+            ? `<span class="hca">${char}</span>`
+            : char;
+        })
+        .join("");
+      tree.currentNode.parentElement?.replaceChild(element, tree.currentNode);
+    }
+  }
   scratchblocks.renderMatching(`#${id} pre code.language-scratch`, {
     style: settingsStore.useScratch2Blocks ? "scratch2" : "scratch3",
     scale: settingsStore.useScratch2Blocks ? 1 : 0.675,
@@ -254,9 +356,5 @@ effect(() => {
 </script>
 
 <template>
-  <div
-    class="max-h-96 space-y-2 break-words [&_a:not(.no-style)]:text-link [&_a:not(.no-style)]:underline [&_blockquote:not(blockquote_blockquote)]:opacity-40 [&_blockquote]:inline-block [&_blockquote]:min-h-5 [&_blockquote]:border-l-2 [&_blockquote]:border-text [&_blockquote]:pl-2 [&_blockquote]:align-top [&_blockquote]:italic [&_h1]:text-4xl/[inherit] [&_h1]:font-bold [&_h2]:text-3xl/[inherit] [&_h2]:font-bold [&_h3]:text-2xl/[inherit] [&_h3]:font-bold [&_h4]:text-xl/[inherit] [&_h4]:font-bold [&_h5]:text-lg/[inherit] [&_h5]:font-bold [&_h6]:text-sm/[inherit] [&_h6]:font-bold [&_hr]:mx-8 [&_hr]:my-2 [&_hr]:border-text [&_hr]:opacity-40 [&_img]:max-h-96 [&_img]:align-top [&_li>ol]:pl-2 [&_li>ul]:pl-2 [&_li]:list-inside [&_ol_li]:list-decimal [&_td]:border-[1px] [&_td]:border-text [&_td]:px-2 [&_td]:py-1 [&_th]:border-[1px] [&_th]:border-text [&_th]:px-2 [&_th]:py-1 [&_ul_li]:list-disc [&_video]:max-h-96"
-    :id="id"
-    ref="main"
-  ></div>
+  <div class="style-prose max-h-96" :id="id" ref="main"></div>
 </template>
